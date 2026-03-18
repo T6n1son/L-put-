@@ -570,23 +570,40 @@ Jira.prototype.commentIssue = function (issue_key) {
 
 Jira.prototype.sendRequest = function (method, path, data) {
     this.request.clearHeader();
-    this.request.addHeaders('Authorization: Basic ' + btoa(this.params.jira_user + ':' + this.params.jira_password));
 
-    var response = this.request.jsonRequest(method, this.params.jira_url + path, data);
+    // Build Basic Auth header (Jira Cloud: user = email, pass = API token)
+    var creds = this.params.jira_user + ':' + this.params.jira_password;
+    var authHeader = 'Authorization: Basic ' + btoa(creds);                 
+    this.request.addHeaders(authHeader);                                    
+                                                                            
+    var response = this.request.jsonRequest(                               
+        method,                                                            
+        this.params.jira_url + path,                                       
+        data                                                              
+    );                                                                     
+                                                                            
+    if (this.request.getStatus() !== 200 &&                                
+        this.request.getStatus() !== 201) {                                
+                                                                            
+        Logger.log(Logger.WARN, 'HTTP code: ' + this.request.getStatus()); 
+                                                                            
+        if (CParamValidator.isType(response.description, 'string')) {      
+            throw response.description;                                     
+        }                                                                   
+        else {                                                              
+            Logger.log(                                                    
+                Logger.WARN,                                               
+                'Request not successful. Received response: ' +            
+                JSON.stringify(response)                                   
+            );                                                             
+            throw 'Unknown error. Check debug log for more information.';  
+        }                                                                   
+    }                                                                      
+                                                                            
+    return response;                                                        
+};
 
-    if ((this.request.getStatus() !== 200 && this.request.getStatus() !== 201)) {
-        Logger.log(Logger.WARN, 'HTTP code: ' + this.request.getStatus());
-        if (CParamValidator.isType(response.description, 'string')) {
-            throw response.description;
-        }
-        else {
-            Logger.log(Logger.WARN, 'Request not successful. Received response: ' + JSON.stringify(response));
-            throw 'Unknown error. Check debug log for more information.';
-        }
-    }
 
-    return response;
-}
 
 Jira.prototype.onProblem = function (alert) {
     if (this.params.event_tags_json.length > 0 && getTagValue(this.params.event_tags_json, '__zbx_jira_issuekey', false) !== false) {
