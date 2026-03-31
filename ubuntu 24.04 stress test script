@@ -1,0 +1,145 @@
+#!/bin/bash 
+
+# Shebang – ütleb Linuxile, et see skript peab jooksma bash shelliga 
+
+ 
+ 
+
+echo "Alustan lõputut koormust Zabbix'i testimiseks." 
+
+echo "CPU, RAM ja DISK koormus läheb 90-100% peale." 
+
+echo "Lõpetamiseks vajuta CTRL+C" 
+
+echo "" 
+
+ 
+ 
+
+# ------------------------------------------------------------ 
+
+# CLEANUP FUNKTSIOON – kutsutakse välja kui skript lõpetatakse 
+
+# ------------------------------------------------------------ 
+
+cleanup() { 
+
+    echo "" 
+
+    echo "→ Koristan ära kõik koormusprotsessid ja ajutised failid..." 
+
+ 
+ 
+
+    # Tapab kõik protsessid, mille nimi sisaldab "stress" 
+
+    # pkill -f otsib nime käsurea järgi, mitte ainult täisnimi protsessieks 
+
+    pkill -f "stress" 
+
+    pkill -f "stress-ng" 
+
+     
+
+    # Tapab kõik dd protsessid, mis kirjutavad diskstress faili 
+
+    pkill -f "dd if=/dev/zero of=/tmp/diskstress" 
+
+ 
+ 
+
+    # Kustutab ajutise test-faili (disk I/O koormuse fail) 
+
+    rm -f /tmp/diskstress 
+
+ 
+ 
+
+    echo "✓ Koristus tehtud. Väljun." 
+
+    exit 0   # lõpetab skripti 
+
+} 
+
+ 
+ 
+
+# ------------------------------------------------------------ 
+
+# SIGNAAIILDE PÜÜDMINE 
+
+# Kui skript saab mõne järgmistest signaalidest, 
+
+# siis käivitatakse cleanup() automaatselt: 
+
+#   INT  – CTRL+C vajutamine 
+
+#   TERM – kill PID 
+
+#   EXIT – tavaline skripti lõpp või terminali sulgemine 
+
+# ------------------------------------------------------------ 
+
+trap cleanup INT TERM EXIT 
+
+ 
+ 
+
+# ------------------------------------------------------------ 
+
+# LÕPUTU LOOP, MIS LOOB KÕRGE KOORMUSE 
+
+# ------------------------------------------------------------ 
+
+while true; do 
+
+    echo "→ CPU koormus" 
+
+    # Käivitab stress CPU koormajal n operatsiooniga 
+
+    # $(nproc) annab CPU tuumade arvu 
+
+    /usr/bin/stress --cpu $(nproc) & 
+
+ 
+ 
+
+    echo "→ RAM koormus (~90%)" 
+
+    # stress-ng allokeerib 4 VM protsessi 
+
+    # --vm-bytes 90% = võtab umbes 90% kogu RAM-ist 
+
+    # --vm-keep = hoiab mälu aktiivsena (muudab, mitte lihtsalt ei allokeeri) 
+
+    /usr/bin/stress-ng --vm 4 --vm-bytes 90% --vm-keep & 
+
+ 
+ 
+
+    echo "→ DISK I/O koormus (fail ei kasva)" 
+
+    ( 
+
+        # Lõputu loop, mis kirjutab sama faili uuesti ja uuesti üle 
+
+        # count=100 → 100 MB korraga 
+
+        # conv=notrunc → fail ei kasva kunagi suuremaks 
+
+        while true; do 
+
+            dd if=/dev/zero of=/tmp/diskstress bs=1M count=100 oflag=direct conv=notrunc 2>/dev/null 
+
+        done 
+
+    ) & 
+
+ 
+ 
+
+    echo "Koormus käib... (CTRL+C lõpetab)" 
+
+    sleep 30 
+
+done 
