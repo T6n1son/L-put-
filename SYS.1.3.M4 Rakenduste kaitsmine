@@ -1,0 +1,275 @@
+#!/bin/bash
+# ================================================================
+#  Tuuma ja tüüpteekide turvafunktsioonide kontrollskript
+#  Kontrollib: ASLR, NX, RELRO, PIE, Stack Canary, FORTIFY,
+#              RPATH, AppArmor/SELinux, Seccomp, sysctl
+# ================================================================
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
+
+ok()    { echo -e "    ${GREEN}✓${NC}  $*"; }
+fail()  { echo -e "    ${RED}✗${NC}  $*"; }
+warn()  { echo -e "    ${YELLOW}!${NC}  $*"; }
+info()  { echo -e "    ${CYAN}→${NC}  ${DIM}$*${NC}"; }
+header(){ echo -e "\n${BOLD}┌─────────────────────────────────────────────────┐${NC}"; \
+          printf "${BOLD}│  %-47s │${NC}\n" "$1"; \
+          echo -e "${BOLD}└─────────────────────────────────────────────────┘${NC}"; }
+sub()   { echo -e "\n  ${BOLD}▸ $*${NC}"; }
+
+SCORE_OK=0; SCORE_FAIL=0; SCORE_WARN=0
+
+chk_ok()   { ok "$@";   ((SCORE_OK++)); }
+chk_fail() { fail "$@"; ((SCORE_FAIL++)); }
+chk_warn() { warn "$@"; ((SCORE_WARN++)); }
+
+echo -e "\n${BOLD}╔══════════════════════════════════════════════════╗${NC}"
+echo -e "${BOLD}║    TUUMA & TÜÜPTEEKIDE TURVAFUNKTSIOONID        ║${NC}"
+echo -e "${BOLD}║    Süsteem: $(uname -r | cut -c1-20) $(date '+%Y-%m-%d %H:%M')    ║${NC}"
+echo -e "${BOLD}╚══════════════════════════════════════════════════╝${NC}"
+
+# ================================================================
+header "1. TUUMA (KERNEL) TURVASEADED — sysctl"
+# ================================================================
+
+sysctl_check() {
+    local key="$1" good="$2" label="$3" tip="$4"
+    local val
+    val=$(sysctl -n "$key" 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        warn "$label ($key): puudub/piiratud keskkond"
+        ((SCORE_WARN++))
+        return
+    fi
+    if [ "$val" = "$good" ]; then
+        chk_ok "$label = $val"
+    else
+        chk_fail "$label = $val (soovitav: $good)"
+        [ -n "$tip" ] && info "Paranda: sysctl -w $key=$good"
+    fi
+}
+
+sub "Mälu juhuslikustamine"
+sysctl_check kernel.randomize_va_space 2 "ASLR" \
+    "echo 2 > /proc/sys/kernel/randomize_va_space"
+
+sub "Kerneli logi ja sümbolite kaitse"
+sysctl_check kernel.dmesg_restrict     1 "dmesg_restrict (dmesg piiratud)"
+sysctl_check kernel.kptr_restrict      2 "kptr_restrict (kerneli aadressid peidetud)"
+
+sub "Protsesside jälgimine (ptrace)"
+val=$(sysctl -n kernel.yama.ptrace_scope 2>/dev/null)
+if [ -z "$val" ]; then
+    warn "kernel.yama.ptrace_scope: puudub (Yama LSM pole laetud)"
+    ((SCORE_WARN++))
+else
+    case "$val" in
+        0) chk_fail "ptrace_scope = 0 (igaüks saab jälgida)" ;;
+        1) chk_ok   "ptrace_scope = 1 (ainult vanem-protsess)" ;;
+        2) chk_ok   "ptrace_scope = 2 (ainult root)" ;;
+        3) chk_ok   "ptrace_scope = 3 (ptrace keelatud)" ;;
+    esac
+fi
+
+sub "BPF ja jõudlusmõõtmine"
+sysctl_check kernel.perf_event_paranoid    3 "perf_event_paranoid"
+sysctl_check kernel.unprivileged_bpf_disabled 1 "unprivileged_bpf_disabled"
+sysctl_check net.core.bpf_jit_harden       2 "bpf_jit_harden"
+
+sub "Failisüsteemi kaitse"
+sysctl_check fs.protected_hardlinks  1 "protected_hardlinks"
+sysctl_check fs.protected_symlinks   1 "protected_symlinks"
+sysctl_check fs.suid_dumpable        0 "suid_dumpable (core dump piiratud)"
+
+# ================================================================
+header "2. CPU RIISTVARA TURVAFUNKTSIOONID"
+# ================================================================
+
+for flag in nx smep smap; do
+    if grep -qw "$flag" /proc/cpuinfo 2>/dev/null; then
+        case $flag in
+            nx)   chk_ok "NX/XD bitt: CPU toetab mälu täitmiskaitstet" ;;
+            smep) chk_ok "SMEP: kernel ei täida kasutajaruumi koodi" ;;
+            smap) chk_ok "SMAP: kernel ei loe kasutajaruumi mälu" ;;
+        esac
+    else
+        chk_fail "${flag^^}: puudub"
+    fi
+done
+
+# ================================================================
+header "3. TÜÜPTEEKIDE KAITSEFUNKTSIOONID (binaarid)"
+# ================================================================
+
+BINS=()
+for b in /bin/bash /bin/ls /usr/bin/sudo /usr/bin/python3 \
+         /usr/bin/perl /usr/sbin/sshd /usr/bin/ssh \
+         /usr/bin/passwd /usr/bin/gpg; do
+    [ -f "$b" ] && BINS+=("$b")
+done
+
+if ! command -v readelf &>/dev/null; then
+    warn "readelf pole installitud — binaaride kontroll vahele jäetud"
+    warn "Installi: apt install binutils"
+else
+    # Päis
+    echo ""
+    printf "  %-22s %-10s %-8s %-8s %-8s %-8s %-8s\n" \
+        "Binaar" "RELRO" "Canary" "PIE" "NX" "FORTIFY" "RPATH"
+    echo "  $(printf '%.0s─' {1..80})"
+
+    for bin in "${BINS[@]}"; do
+        name=$(basename "$bin")
+
+        # RELRO
+        relro_seg=$(readelf -l "$bin" 2>/dev/null | grep GNU_RELRO)
+        bind_now=$(readelf -d  "$bin" 2>/dev/null | grep BIND_NOW)
+        if [ -n "$relro_seg" ] && [ -n "$bind_now" ]; then
+            relro="${GREEN}Full${NC}"; ((SCORE_OK++))
+        elif [ -n "$relro_seg" ]; then
+            relro="${YELLOW}Partial${NC}"; ((SCORE_WARN++))
+        else
+            relro="${RED}Puudub${NC}"; ((SCORE_FAIL++))
+        fi
+
+        # Stack Canary
+        if readelf -s "$bin" 2>/dev/null | grep -q '__stack_chk_fail'; then
+            canary="${GREEN}Jah${NC}"; ((SCORE_OK++))
+        else
+            canary="${RED}Ei${NC}"; ((SCORE_FAIL++))
+        fi
+
+        # PIE
+        etype=$(readelf -h "$bin" 2>/dev/null | awk '/Type:/{print $2}')
+        if [ "$etype" = "DYN" ]; then
+            pie="${GREEN}Jah${NC}"; ((SCORE_OK++))
+        else
+            pie="${RED}Ei${NC}"; ((SCORE_FAIL++))
+        fi
+
+        # NX
+        nx_flag=$(readelf -l "$bin" 2>/dev/null | awk '/GNU_STACK/{print $NF}')
+        if [ "$nx_flag" = "RWE" ]; then
+            nx="${RED}Ei${NC}"; ((SCORE_FAIL++))
+        else
+            nx="${GREEN}Jah${NC}"; ((SCORE_OK++))
+        fi
+
+        # FORTIFY
+        if readelf -s "$bin" 2>/dev/null | grep -q '__.*_chk'; then
+            fortify="${GREEN}Jah${NC}"; ((SCORE_OK++))
+        else
+            fortify="${RED}Ei${NC}"; ((SCORE_FAIL++))
+        fi
+
+        # RPATH (ohtlik)
+        rpath=$(readelf -d "$bin" 2>/dev/null | grep -i 'rpath\|runpath')
+        if [ -n "$rpath" ]; then
+            rpath_s="${RED}OHTLIK${NC}"; ((SCORE_FAIL++))
+        else
+            rpath_s="${GREEN}Ei${NC}"; ((SCORE_OK++))
+        fi
+
+        printf "  %-22s " "$name"
+        printf "%-20b %-18b %-18b %-18b %-18b %-18b\n" \
+            "$relro" "$canary" "$pie" "$nx" "$fortify" "$rpath_s"
+    done
+fi
+
+# ================================================================
+header "4. LIBC TURVAFUNKTSIOONID"
+# ================================================================
+
+libc=$(ldconfig -p 2>/dev/null | awk '/libc\.so\.6/{print $NF; exit}')
+if [ -z "$libc" ]; then
+    warn "libc.so.6 ei leitud"
+else
+    info "Asukoht: $libc"
+
+    # NX
+    nx_libc=$(readelf -l "$libc" 2>/dev/null | awk '/GNU_STACK/{print $NF}')
+    [ "$nx_libc" != "RWE" ] && chk_ok "libc NX: sees" || chk_fail "libc NX: väljas"
+
+    # RELRO
+    relro_libc=$(readelf -l "$libc" 2>/dev/null | grep GNU_RELRO)
+    [ -n "$relro_libc" ] && chk_ok "libc RELRO: olemas" || chk_fail "libc RELRO: puudub"
+
+    # PIE / shared object
+    etype_libc=$(readelf -h "$libc" 2>/dev/null | awk '/Type:/{print $2}')
+    [ "$etype_libc" = "DYN" ] && chk_ok "libc PIE/PIC: jah (DYN)" || chk_warn "libc tüüp: $etype_libc"
+
+    # FORTIFY funktsioonid
+    fortify_count=$(readelf -s "$libc" 2>/dev/null | grep -c '__.*_chk')
+    if [ "$fortify_count" -gt 0 ]; then
+        chk_ok "libc FORTIFY: $fortify_count kaitstud funktsiooni"
+    else
+        chk_fail "libc FORTIFY: funktsioonid puuduvad"
+    fi
+fi
+
+# ================================================================
+header "5. TÄIENDAVAD TURVAMEHHANISMID"
+# ================================================================
+
+sub "AppArmor"
+if command -v aa-status &>/dev/null; then
+    profiles=$(aa-status 2>/dev/null | grep 'profiles are loaded' | awk '{print $1}')
+    enforced=$(aa-status 2>/dev/null | grep 'profiles are in enforce' | awk '{print $1}')
+    if [ -n "$profiles" ] && [ "$profiles" -gt 0 ]; then
+        chk_ok "AppArmor: $profiles profiili laetud, $enforced enforce-režiimis"
+    else
+        chk_warn "AppArmor: aktiivne aga profiilid puuduvad"
+    fi
+elif [ -d /sys/kernel/security/apparmor ]; then
+    chk_warn "AppArmor: tuumamoodul laetud, aa-status pole installitud"
+else
+    chk_warn "AppArmor: pole aktiivne"
+fi
+
+sub "SELinux"
+if command -v getenforce &>/dev/null; then
+    se=$(getenforce 2>/dev/null)
+    case "$se" in
+        Enforcing)  chk_ok "SELinux: Enforcing" ;;
+        Permissive) chk_warn "SELinux: Permissive (ainult logib)" ;;
+        Disabled)   chk_fail "SELinux: Disabled" ;;
+    esac
+else
+    warn "SELinux: pole installitud"
+fi
+
+sub "Seccomp (praegune protsess)"
+sec=$(grep -i 'Seccomp:' /proc/$$/status 2>/dev/null | awk '{print $2}')
+case "$sec" in
+    0) warn "Seccomp: väljas (praegusel protsessil)" ;;
+    1) chk_ok "Seccomp: strict režiim" ;;
+    2) chk_ok "Seccomp: filter režiim (BPF)" ;;
+    *) warn "Seccomp: teadmata ($sec)" ;;
+esac
+
+# ================================================================
+header "KOKKUVÕTE"
+# ================================================================
+
+TOTAL=$((SCORE_OK + SCORE_FAIL + SCORE_WARN))
+PCT=0
+[ $TOTAL -gt 0 ] && PCT=$(( SCORE_OK * 100 / TOTAL ))
+
+echo ""
+echo -e "  ${GREEN}✓ Korras:    $SCORE_OK${NC}"
+echo -e "  ${YELLOW}! Hoiatus:   $SCORE_WARN${NC}"
+echo -e "  ${RED}✗ Probleem:  $SCORE_FAIL${NC}"
+echo -e "  ─────────────────────"
+echo -e "  ${BOLD}Tulemus: $PCT% ($SCORE_OK/$TOTAL)${NC}"
+echo ""
+
+if   [ $PCT -ge 80 ]; then echo -e "  ${GREEN}${BOLD}► Süsteem on hästi kaitstud.${NC}"
+elif [ $PCT -ge 50 ]; then echo -e "  ${YELLOW}${BOLD}► Süsteemil on turvavõimalusi parandada.${NC}"
+else                        echo -e "  ${RED}${BOLD}► Süsteem vajab kiiret turvakonfiguratsiooni!${NC}"
+fi
+
+echo ""
+echo -e "  ${DIM}Soovitused:${NC}"
+echo -e "  ${CYAN}→${NC} ${DIM}ASLR:    sysctl -w kernel.randomize_va_space=2${NC}"
+echo -e "  ${CYAN}→${NC} ${DIM}Kompileeri: gcc -fstack-protector-strong -D_FORTIFY_SOURCE=2 -pie -fPIE -Wl,-z,relro,-z,now${NC}"
+echo ""
