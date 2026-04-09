@@ -1,0 +1,135 @@
+#!/bin/bash
+
+# ============================================================
+#  ASLR ja DEP/NX turvaaukude kontrollskript
+# ============================================================
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+ok()   { echo -e "  ${GREEN}✓${NC} $*"; }
+fail() { echo -e "  ${RED}✗${NC} $*"; }
+warn() { echo -e "  ${YELLOW}!${NC} $*"; }
+info() { echo -e "  ${CYAN}→${NC} $*"; }
+
+echo -e "\n${BOLD}══════════════════════════════════════════════${NC}"
+echo -e "${BOLD}   TURVAMEHHANISMIDE KONTROLL$(NC)"
+echo -e "${BOLD}══════════════════════════════════════════════${NC}\n"
+
+# ─────────────────────────────────────────────
+# 1. ASLR
+# ─────────────────────────────────────────────
+echo -e "${BOLD}[ 1 ] ASLR — Address Space Layout Randomization${NC}"
+
+ASLR_FILE="/proc/sys/kernel/randomize_va_space"
+if [ -f "$ASLR_FILE" ]; then
+    val=$(cat "$ASLR_FILE")
+    case $val in
+        0) fail "ASLR on VÄLJA lülitatud (väärtus=0)" ;;
+        1) warn "ASLR on osaliselt sees (väärtus=1) — soovitav on 2" ;;
+        2) ok   "ASLR on täielikult sees (väärtus=2)" ;;
+        *) warn "Tundmatu väärtus: $val" ;;
+    esac
+    info "Lubatud piirkonnad: virn, kuhi, teegid, andmesegment"
+else
+    warn "Fail $ASLR_FILE puudub (konteiner/piiratud keskkond)"
+    info "Päris süsteemil: cat $ASLR_FILE"
+fi
+
+# ─────────────────────────────────────────────
+# 2. NX / DEP — CPU riistvara tugi
+# ─────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}[ 2 ] DEP/NX — No-Execute (riistvara)${NC}"
+
+if grep -qw 'nx' /proc/cpuinfo 2>/dev/null; then
+    ok "CPU toetab NX/XD bitti (riistvara NX olemas)"
+else
+    fail "CPU ei toeta NX bitti — DEP ei tööta riistvaraliselt"
+fi
+
+# SMEP / SMAP
+for flag in smep smap; do
+    if grep -qw "$flag" /proc/cpuinfo 2>/dev/null; then
+        case $flag in
+            smep) ok "SMEP: kernel ei täida kasutajaruumi koodi" ;;
+            smap) ok "SMAP: kernel ei loe kasutajaruumi mälu (ilma loata)" ;;
+        esac
+    else
+        warn "${flag^^} puudub"
+    fi
+done
+
+# ─────────────────────────────────────────────
+# 3. NX binaarides (GNU_STACK)
+# ─────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}[ 3 ] DEP/NX — binaari tasemel (GNU_STACK)${NC}"
+
+if ! command -v readelf &>/dev/null; then
+    warn "readelf pole installitud (apt install binutils)"
+else
+    BINS=()
+    for b in /bin/bash /bin/ls /usr/bin/python3 /usr/bin/perl \
+              /usr/sbin/sshd /usr/bin/sudo /usr/lib/openssh/sftp-server; do
+        [ -f "$b" ] && BINS+=("$b")
+    done
+
+    nx_ok=0; nx_fail=0
+    for bin in "${BINS[@]}"; do
+        stack=$(readelf -l "$bin" 2>/dev/null | awk '/GNU_STACK/{print $NF}')
+        if [ "$stack" = "RWE" ]; then
+            fail "NX PUUDUB — $(basename $bin) (virn täidetav!)"
+            ((nx_fail++))
+        elif [ -z "$stack" ]; then
+            warn "$(basename $bin) — GNU_STACK info puudub"
+        else
+            ok "$(basename $bin) — NX sees (virn: $stack)"
+            ((nx_ok++))
+        fi
+    done
+
+    echo ""
+    info "Kokku kontrollitud: ${#BINS[@]} binaari — ${GREEN}${nx_ok} OK${NC}, ${RED}${nx_fail} ohtlik${NC}"
+fi
+
+# ─────────────────────────────────────────────
+# 4. Lisaotsing: NX-ta binaarid süsteemis
+# ─────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}[ 4 ] Otsing: NX-ta binaarid /usr/bin ja /bin${NC}"
+
+if command -v readelf &>/dev/null; then
+    found=0
+    while IFS= read -r f; do
+        stack=$(readelf -l "$f" 2>/dev/null | awk '/GNU_STACK/{print $NF}')
+        if [ "$stack" = "RWE" ]; then
+            fail "$f"
+            ((found++))
+        fi
+    done < <(find /usr/bin /bin /sbin -maxdepth 1 -type f -executable 2>/dev/null)
+
+    if [ "$found" -eq 0 ]; then
+        ok "Ohtlikke binaare ei leitud"
+    else
+        warn "Leitud $found binaari ilma NX-ita!"
+    fi
+else
+    warn "readelf puudub, otsing vahele jäetud"
+fi
+
+# ─────────────────────────────────────────────
+# Kokkuvõte
+# ─────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}══════════════════════════════════════════════${NC}"
+echo -e "${BOLD}   SOOVITUSED${NC}"
+echo -e "${BOLD}══════════════════════════════════════════════${NC}"
+echo -e "  ASLR sisse:   ${CYAN}echo 2 | sudo tee /proc/sys/kernel/randomize_va_space${NC}"
+echo -e "  Püsivalt:     ${CYAN}echo 'kernel.randomize_va_space=2' >> /etc/sysctl.conf${NC}"
+echo -e "  NX kompilaator: ${CYAN}gcc -z noexecstack -o prog prog.c${NC}"
+echo ""
