@@ -1,2 +1,2 @@
-# L-put-
-lõputöö scriptid ja pahn
+# Lõputöö
+Lõputöö skriptid
