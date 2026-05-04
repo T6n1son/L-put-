@@ -1,15 +1,53 @@
-bash << 'EOF'
+#!/bin/bash
+ 
+LOG_DIR="/var/log"
+LOG_FILE="${LOG_DIR}/gid_check.log"
+ 
+# Kui /var/log pole kirjutatav, pane logi kodukausta
+if [ ! -w "$LOG_DIR" ]; then
+    LOG_FILE="$HOME/gid_check.log"
+fi
+ 
+# Struktureeritud logi funktsioon — sama formaat mis eelmistes skriptides
+slog() {
+    local level="$1"
+    local category="$2"
+    local message="$3"
+    local ts
+    ts=$(date '+%Y-%m-%d %H:%M:%S')
+    printf "[%s] [%-4s] [%-20s] %s\n" "$ts" "$level" "$category" "$message" >> "$LOG_FILE"
+}
+ 
+# Seansi päis
+{
+    echo "================================================================"
+    echo " GID KONTROLL — $(date '+%Y-%m-%d %H:%M:%S')"
+    echo " Süsteem: $(hostname)"
+    echo "================================================================"
+} >> "$LOG_FILE"
+ 
 passwd_gids=$(awk -F: '{print $4}' /etc/passwd | sort -n | uniq)
 group_gids=$(awk -F: '{print $3}' /etc/group | sort -n | uniq)
 missing=$(comm -23 <(echo "$passwd_gids") <(echo "$group_gids"))
-
+ 
 if [ -z "$missing" ]; then
     echo "✓ Kõik GID-d on defineeritud /etc/group failis."
+    slog "OK" "GID/CHECK" "Kõik GID-d on defineeritud /etc/group failis"
 else
     echo "✗ Puuduvad GID-d:"
+    slog "FAIL" "GID/CHECK" "Leitud puuduvaid GID-sid /etc/group failis"
     for gid in $missing; do
         users=$(awk -F: -v g="$gid" '$4==g {print $1}' /etc/passwd | tr '\n' ' ')
         echo "  GID $gid  (kasutajad: $users)"
+        slog "FAIL" "GID/$gid" "GID puudub /etc/group-st — kasutajad: $users"
     done
 fi
-EOF
+ 
+# Kokkuvõte logi lõppu
+{
+    echo "================================================================"
+    echo ""
+} >> "$LOG_FILE"
+ 
+echo ""
+echo "→ Logi salvestatud: $LOG_FILE"
