@@ -1,111 +1,197 @@
 #!/bin/bash
 set -euo pipefail
-
+ 
 ############################################
 # SYS.1.3.M5 – TURVALINE INSTALL
 ############################################
-
+ 
 # ---- ÜLDSEADED ----
-SOFTWARE_NAME="example-software"
-VERSION="1.0.0"
-
-ARCHIVE="example-software-1.0.0.tar.gz"
+SOFTWARE_NAME="Tarkvara-nimi" /*MUUDA ÄRA*/
+VERSION="1.0.0" /*MUUDA ÄRA*/
+ARCHIVE="example-software-1.0.0.tar.gz" /*MUUDA ÄRA*/
 CHECKSUM_FILE="SHA256SUMS"
 SIGNATURE_FILE="SHA256SUMS.gpg"
-GPG_KEY_ID="0xABCDE12345"
-
-BUILD_USER="builduser"
+GPG_KEY_ID="0xABCDE12345" /*MUUDA ÄRA*/
+BUILD_USER="builduser" /*MUUDA ÄRA*/
 BUILD_DIR="/home/${BUILD_USER}/build-${SOFTWARE_NAME}"
 INSTALL_PREFIX="/opt/${SOFTWARE_NAME}"
-
 LOG_DIR="/var/log/secure-install"
 LOG_FILE="${LOG_DIR}/${SOFTWARE_NAME}-${VERSION}.log"
 BUILD_CONFIG_LOG="${LOG_DIR}/${SOFTWARE_NAME}-${VERSION}-build-options.log"
-
+STRUCTURED_LOG="${LOG_DIR}/${SOFTWARE_NAME}-${VERSION}-structured.log"
+ 
 ############################################
 # ABIFUNKTSIOONID
 ############################################
+ 
+# Vana logi funktsioon (säilitatud ühilduvuseks)
 fail() {
-  echo "VIGA: $1" | tee -a "$LOG_FILE"
-  exit 1
+    local msg="$1"
+    slog "FAIL" "INSTALL" "$msg"
+    echo "VIGA: $msg" | tee -a "$LOG_FILE"
+    exit 1
 }
-
+ 
 log() {
-  echo "$(date '+%F %T') $1" | tee -a "$LOG_FILE"
+    local msg="$1"
+    echo "$(date '+%F %T') $msg" | tee -a "$LOG_FILE"
 }
-
+ 
+# Struktureeritud logi — sama formaat mis eits_check.sh-s
+# [2026-05-04 14:32:01] [OK  ] [KATEGOORIA          ] Sõnum
+slog() {
+    local level="$1"     # OK | FAIL | WARN | INFO
+    local category="$2"  # nt GPG, CHECKSUM, BUILD ...
+    local message="$3"
+    local ts
+    ts=$(date '+%Y-%m-%d %H:%M:%S')
+    printf "[%s] [%-4s] [%-20s] %s\n" \
+        "$ts" "$level" "$category" "$message" >> "$STRUCTURED_LOG"
+}
+ 
 ############################################
 # ETTEVALMISTUS
 ############################################
+ 
 mkdir -p "$LOG_DIR"
 touch "$LOG_FILE"
-
+touch "$STRUCTURED_LOG"
+ 
+# Seansi päis struktureeritud logis
+{
+    echo "================================================================"
+    echo " SYS.1.3.M5 TURVALINE INSTALL — $(date '+%Y-%m-%d %H:%M:%S')"
+    echo " Tarkvara: $SOFTWARE_NAME v$VERSION"
+    echo " Süsteem:  $(hostname)"
+    echo "================================================================"
+} >> "$STRUCTURED_LOG"
+ 
 log "Alustan SYS.1.3.M5 turvalist installiprotsessi"
-
+slog "INFO" "INSTALL" "Alustan: $SOFTWARE_NAME v$VERSION"
+ 
 ############################################
 # a) TERVIKLUSE JA AUTENTSUSE KONTROLL
 ############################################
+ 
 log "Kontrollin GPG võtit"
 if ! gpg --list-keys "$GPG_KEY_ID" > /dev/null 2>&1; then
-  gpg --recv-keys "$GPG_KEY_ID" || fail "GPG võtme import ebaõnnestus"
+    slog "INFO" "GPG/IMPORT" "Võti $GPG_KEY_ID pole võtmerõngas — impordin"
+    if gpg --recv-keys "$GPG_KEY_ID"; then
+        slog "OK" "GPG/IMPORT" "Võti $GPG_KEY_ID imporditud edukalt"
+    else
+        slog "FAIL" "GPG/IMPORT" "Võtme $GPG_KEY_ID import ebaõnnestus"
+        fail "GPG võtme import ebaõnnestus"
+    fi
+else
+    slog "OK" "GPG/IMPORT" "Võti $GPG_KEY_ID on juba võtmerõngas"
 fi
-
+ 
 log "Kontrollin allkirja"
-gpg --verify "$SIGNATURE_FILE" "$CHECKSUM_FILE" \
-  || fail "Kontrollfaili digiallkiri ei kehti"
-
+if gpg --verify "$SIGNATURE_FILE" "$CHECKSUM_FILE"; then
+    slog "OK" "GPG/SIGNATURE" "Digiallkiri kehtib: $SIGNATURE_FILE → $CHECKSUM_FILE"
+else
+    slog "FAIL" "GPG/SIGNATURE" "Digiallkiri ei kehti: $SIGNATURE_FILE"
+    fail "Kontrollfaili digiallkiri ei kehti"
+fi
+ 
 log "Kontrollin kontrollsummat"
-sha256sum -c "$CHECKSUM_FILE" --ignore-missing \
-  || fail "Kontrollsumma ei klapi"
-
+if sha256sum -c "$CHECKSUM_FILE" --ignore-missing; then
+    slog "OK" "CHECKSUM" "SHA256 kontrollsumma klapib: $ARCHIVE"
+else
+    slog "FAIL" "CHECKSUM" "SHA256 kontrollsumma ei klapi: $ARCHIVE"
+    fail "Kontrollsumma ei klapi"
+fi
+ 
 ############################################
-# b) LAHTIPAKKIMINE JA KOMPIL ATSIOON
+# b) LAHTIPAKKIMINE JA KOMPILATSIOON
 #    PRIVILEGEERIMATA KONTOS
 ############################################
+ 
 log "Kontrollin build-kasutajat"
-id "$BUILD_USER" >/dev/null 2>&1 \
-  || fail "Build-kasutajat ei eksisteeri"
-
+if id "$BUILD_USER" >/dev/null 2>&1; then
+    slog "OK" "BUILD/USER" "Build-kasutaja olemas: $BUILD_USER"
+else
+    slog "FAIL" "BUILD/USER" "Build-kasutajat ei eksisteeri: $BUILD_USER"
+    fail "Build-kasutajat ei eksisteeri"
+fi
+ 
 log "Loon build-kausta"
-sudo -u "$BUILD_USER" mkdir -p "$BUILD_DIR"
-
+if sudo -u "$BUILD_USER" mkdir -p "$BUILD_DIR"; then
+    slog "OK" "BUILD/DIR" "Build-kaust loodud: $BUILD_DIR"
+else
+    slog "FAIL" "BUILD/DIR" "Build-kausta loomine ebaõnnestus: $BUILD_DIR"
+    fail "Build-kausta loomine ebaõnnestus"
+fi
+ 
 log "Lahtipakkimine ja konfigureerimine privilegeerimata kasutajana"
-sudo -u "$BUILD_USER" bash <<EOF
+slog "INFO" "BUILD/UNPACK" "Lahtipakkimine: $ARCHIVE kasutajana $BUILD_USER"
+ 
+if sudo -u "$BUILD_USER" bash <<EOF
 set -e
 cd "$BUILD_DIR"
 tar xf "$PWD/../../$ARCHIVE"
 cd "$SOFTWARE_NAME-$VERSION"
-
 echo "CONFIGURE OPTIONS:" > "$BUILD_CONFIG_LOG"
 echo "--prefix=$INSTALL_PREFIX" >> "$BUILD_CONFIG_LOG"
-
 ./configure --prefix="$INSTALL_PREFIX" | tee -a "$BUILD_CONFIG_LOG"
 make
 EOF
-
+then
+    slog "OK" "BUILD/COMPILE" "Lahtipakkimine ja kompilatsioon õnnestus: $SOFTWARE_NAME-$VERSION"
+else
+    slog "FAIL" "BUILD/COMPILE" "Kompilatsioon ebaõnnestus — vaata: $LOG_FILE"
+    fail "Kompilatsioon ebaõnnestus"
+fi
+ 
 ############################################
-# c) KOMPIL ATSIOONI VALIKUTE
-#    DOKUMENTEERIMINE
+# c) KOMPILATSIOONI VALIKUTE DOKUMENTEERIMINE
 ############################################
+ 
 log "Kompilatsiooni valikud salvestatud: $BUILD_CONFIG_LOG"
-
+slog "OK" "BUILD/CONFIG" "Kompilatsiooni valikud dokumenteeritud: $BUILD_CONFIG_LOG"
+ 
 ############################################
 # d) EI INSTALLITA JUURFAILISÜSTEEMI
 ############################################
+ 
 if [[ "$INSTALL_PREFIX" == "/" ]]; then
-  fail "Installimine juurfailisüsteemi on keelatud"
+    slog "FAIL" "INSTALL/PREFIX" "Keelatud sihtkoht: juurfailisüsteem (/)"
+    fail "Installimine juurfailisüsteemi on keelatud"
+else
+    slog "OK" "INSTALL/PREFIX" "Sihtkoht lubatud: $INSTALL_PREFIX"
 fi
-
+ 
 ############################################
 # e) INSTALL JA DOKUMENTEERIMINE
 ############################################
+ 
 log "Paigaldan tarkvara sihtkohta $INSTALL_PREFIX"
-cd "$BUILD_DIR/$SOFTWARE_NAME-$VERSION"
-make install | tee -a "$LOG_FILE"
-
+slog "INFO" "INSTALL/RUN" "Käivitan: make install → $INSTALL_PREFIX"
+ 
+if cd "$BUILD_DIR/$SOFTWARE_NAME-$VERSION" && make install | tee -a "$LOG_FILE"; then
+    slog "OK" "INSTALL/RUN" "Paigaldus õnnestus: $INSTALL_PREFIX"
+else
+    slog "FAIL" "INSTALL/RUN" "Paigaldus ebaõnnestus — vaata: $LOG_FILE"
+    fail "Paigaldus ebaõnnestus"
+fi
+ 
 log "Paigaldus lõpetatud edukalt"
+slog "OK" "INSTALL" "Kõik sammud lõpetatud edukalt"
+ 
 log "KÕIK sammud on dokumenteeritud failides:"
 log "- $LOG_FILE"
 log "- $BUILD_CONFIG_LOG"
-
+log "- $STRUCTURED_LOG"
 log "SYS.1.3.M5 nõuded on täidetud"
+ 
+# Kokkuvõte struktureeritud logi lõppu
+{
+    echo "----------------------------------------------------------------"
+    echo "TULEMUS: Paigaldus õnnestus"
+    echo "Logifailid:"
+    echo "  Üldlogi:       $LOG_FILE"
+    echo "  Build-valikud: $BUILD_CONFIG_LOG"
+    echo "  Strukt. logi:  $STRUCTURED_LOG"
+    echo "================================================================"
+    echo ""
+} >> "$STRUCTURED_LOG"
